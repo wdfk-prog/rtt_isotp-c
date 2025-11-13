@@ -13,7 +13,7 @@
  * - Supports unique naming for RTOS objects for easier debugging.
  * 
  * @author wdfk-prog ()
- * @version 1.0
+ * @version 1.1
  * @date 2025-11-05
  * 
  * @copyright Copyright (c) 2025  
@@ -22,6 +22,7 @@
  * @par 修改日志:
  * Date       Version Author      Description
  * 2025-11-05 1.0     wdfk-prog   first version
+ * 2025-11-13 1.1     wdfk-prog   Implement non-blocking send functionality and optimize the blocking send interface
  */
 #include "isotp_rtt.h"
 #include <string.h>
@@ -398,23 +399,24 @@ void isotp_rtt_destroy(isotp_rtt_link_t link)
 }
 
 /**
- * @brief  Sends an ISO-TP message in a blocking manner.
- * @note   This function initiates a non-blocking send via `isotp_send` and then
- *         blocks the calling thread by waiting on an event. The event is posted
- *         by the `_isotp_rtt_tx_done_cb` callback upon successful transmission,
- *         or by an error condition.
+ * @brief Sends an ISO-TP message in a blocking manner.
+ * @note  This function initiates a transmission and then blocks the calling thread
+ *        until the entire message is successfully sent or an error/timeout occurs.
  * @param  link The link handle.
  * @param  payload Pointer to the data to send.
  * @param  size Size of the data.
  * @param  timeout Timeout in system ticks.
- * @return RT_EOK on success, -RT_ETIMEOUT on timeout, -RT_ERROR on other failures.
+ * @return Returns ISOTP_RET_OK on success.
+ * @retval ISOTP_RET_TIMEOUT_RTT on timeout.
+ * @retval ISOTP_RET_INVAL_ARGS if the link handle is invalid.
+ * @retval Other ISOTP_RET_* codes for protocol-level errors.
  */
-rt_err_t isotp_rtt_send(isotp_rtt_link_t link, const uint8_t *payload, uint16_t size, rt_int32_t timeout)
+int isotp_rtt_send(isotp_rtt_link_t link, const uint8_t *payload, uint16_t size, rt_int32_t timeout)
 {
+    int ret = ISOTP_RET_OK;
     if (!link)
-        return -RT_EINVAL;
+        return ISOTP_RET_INVAL_ARGS;
 
-    rt_err_t result = RT_EOK;
     rt_uint32_t recved_evt;
 
     rt_mutex_take(link->send_mutex, RT_WAITING_FOREVER);
@@ -422,29 +424,81 @@ rt_err_t isotp_rtt_send(isotp_rtt_link_t link, const uint8_t *payload, uint16_t 
     /* Clear any stale events before starting a new operation. */
     rt_event_recv(&link->event, EVENT_FLAG_TX_DONE | EVENT_FLAG_ERROR | EVENT_FLAG_RX_DONE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 0, &recved_evt);
 
-    int ret = isotp_send(&link->link, payload, size);
+    ret = isotp_send(&link->link, payload, size);
     if (ret != ISOTP_RET_OK)
     {
         LOG_E("isotp_send failed immediately with code: %d", ret);
-        result = -RT_ERROR;
     }
     else
     {
-        /* Block until the TX_DONE or ERROR event is received, or until timeout. */
         if (rt_event_recv(&link->event, EVENT_FLAG_TX_DONE | EVENT_FLAG_ERROR, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, timeout, &recved_evt) != RT_EOK)
         {
             LOG_W("isotp_rtt_send timeout.");
-            result = -RT_ETIMEOUT;
+            ret = ISOTP_RET_TIMEOUT_RTT;
         }
         else if (recved_evt & EVENT_FLAG_ERROR)
         {
             LOG_E("isotp_rtt_send failed with an internal error event.");
-            result = -RT_ERROR;
+            ret = ISOTP_RET_ERROR_RTT;
         }
     }
 
     rt_mutex_release(link->send_mutex);
-    return result;
+    return ret;
+}
+
+/**
+ * @brief Sends an ISO-TP message in a non-blocking manner ("fire and forget").
+ * @note  This function queues the message for transmission and returns immediately.
+ *        It does not wait for the transmission to complete. The user cannot know
+ *        the final status of the transmission when using this function.
+ *        It is suitable for applications that send data periodically without needing
+ *        an immediate acknowledgment of transmission completion.
+ * @param  link The link handle.
+ * @param  payload Pointer to the data to send.
+ * @param  size Size of the data.
+ * @return Returns ISOTP_RET_OK if the message was successfully queued for sending.
+ * @retval ISOTP_RET_INVAL_ARGS if the link handle is invalid.
+ * @retval Other ISOTP_RET_* codes if the message could not be queued (e.g., another send is already in progress).
+ */
+int isotp_rtt_send_nonblocking(isotp_rtt_link_t link, const uint8_t *payload, uint16_t size)
+{
+    int ret = ISOTP_RET_OK;
+    if (!link)
+        return ISOTP_RET_INVAL_ARGS;
+
+    /*
+     * To ensure non-blocking behavior, we use a non-blocking mutex take (`timeout = 0`).
+     * This attempts to acquire the lock. If another send operation (blocking or non-blocking)
+     * is already in progress, it will fail immediately instead of waiting.
+     */
+    if (rt_mutex_take(link->send_mutex, 0) != RT_EOK)
+    {
+        /*
+         * Another send is already in progress on this link. Return a specific error
+         * to indicate that the resource is busy.
+         */
+        return ISOTP_RET_INPROGRESS;
+    }
+
+    /* Clear stale events. */
+    rt_uint32_t recved_evt;
+    rt_event_recv(&link->event, EVENT_FLAG_TX_DONE | EVENT_FLAG_ERROR | EVENT_FLAG_RX_DONE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, 0, &recved_evt);
+    
+    /*
+     * Call the core library's send function.
+     */
+    ret = isotp_send(&link->link, payload, size);
+    
+    /*
+     * IMPORTANT: We immediately release the mutex. The actual CAN frames will be sent
+     * in the background by the isotp_poll thread. This function returns now,
+     * without waiting for the TX_DONE event. If isotp_send() fails immediately
+     * (e.g., wrong length), that error code will be returned. Otherwise, it will
+     * return ISOTP_RET_OK, meaning the message is *queued*.
+     */
+    rt_mutex_release(link->send_mutex);
+    return ret;
 }
 
 /**

@@ -7,7 +7,7 @@
  * in a thread-safe and blocking manner suitable for an RTOS environment.
  * 
  * @author wdfk-prog ()
- * @version 1.0
+ * @version 1.1
  * @date 2025-11-08
  * 
  * @copyright Copyright (c) 2025  
@@ -16,6 +16,7 @@
  * @par 修改日志:
  * Date       Version Author      Description
  * 2025-11-08 1.0     wdfk-prog   first version
+ * 2025-11-13 1.1     wdfk-prog   Implement non-blocking send functionality and optimize the blocking send interface
  */
 #ifndef __ISOTP_RTT_H__
 #define __ISOTP_RTT_H__
@@ -23,6 +24,18 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include "isotp-c/isotp.h"
+
+/**
+ * @name RT-Thread Adapter Specific Return Codes
+ * @{
+ * @brief These codes are returned by the adapter layer functions and supplement
+ *        the standard ISOTP_RET_* codes from the core library.
+ */
+#define ISOTP_RET_INVAL_ARGS   -8  ///< Invalid arguments passed to the function (e.g., NULL link).
+#define ISOTP_RET_TIMEOUT_RTT  -9  ///< Operation timed out (RT-Thread specific timeout).
+#define ISOTP_RET_ERROR_RTT    -10 ///< An internal adapter-level error occurred.
+/** @} */
+
 
 /**
  * @brief Handle to an ISO-TP link instance.
@@ -97,21 +110,35 @@ void isotp_rtt_destroy(isotp_rtt_link_t link);
 void isotp_rtt_on_can_msg_received(struct rt_can_msg *msg);
 
 /**
- * @brief Sends a complete data payload (PDU) over an ISO-TP link in a blocking manner.
- *
- * This function initiates the ISO-TP transmission and then blocks the calling thread
- * until the entire message is successfully sent or a timeout occurs.
- *
- * @param link      The handle of the link to send the message on.
- * @param payload   A pointer to the data payload to be sent.
- * @param size      The size of the data payload in bytes.
- * @param timeout   The maximum time to wait for the transmission to complete, in system ticks.
- *
- * @return Returns RT_EOK on success.
- * @retval -RT_ETIMEOUT if the transmission did not complete within the specified timeout.
- * @retval -RT_ERROR for other protocol-level errors.
+ * @brief Sends an ISO-TP message in a blocking manner.
+ * @note  This function initiates a transmission and then blocks the calling thread
+ *        until the entire message is successfully sent or an error/timeout occurs.
+ * @param  link The link handle.
+ * @param  payload Pointer to the data to send.
+ * @param  size Size of the data.
+ * @param  timeout Timeout in system ticks.
+ * @return Returns ISOTP_RET_OK on success.
+ * @retval ISOTP_RET_TIMEOUT_RTT on timeout.
+ * @retval ISOTP_RET_INVAL_ARGS if the link handle is invalid.
+ * @retval Other ISOTP_RET_* codes for protocol-level errors.
  */
-rt_err_t isotp_rtt_send(isotp_rtt_link_t link, const uint8_t* payload, uint16_t size, rt_int32_t timeout);
+int isotp_rtt_send(isotp_rtt_link_t link, const uint8_t *payload, uint16_t size, rt_int32_t timeout);
+
+/**
+ * @brief Sends an ISO-TP message in a non-blocking manner ("fire and forget").
+ * @note  This function queues the message for transmission and returns immediately.
+ *        It does not wait for the transmission to complete. The user cannot know
+ *        the final status of the transmission when using this function.
+ *        It is suitable for applications that send data periodically without needing
+ *        an immediate acknowledgment of transmission completion.
+ * @param  link The link handle.
+ * @param  payload Pointer to the data to send.
+ * @param  size Size of the data.
+ * @return Returns ISOTP_RET_OK if the message was successfully queued for sending.
+ * @retval ISOTP_RET_INVAL_ARGS if the link handle is invalid.
+ * @retval Other ISOTP_RET_* codes if the message could not be queued (e.g., another send is already in progress).
+ */
+int isotp_rtt_send_nonblocking(isotp_rtt_link_t link, const uint8_t *payload, uint16_t size);
 
 /**
  * @brief Receives a complete data payload (PDU) from an ISO-TP link in a blocking manner.
