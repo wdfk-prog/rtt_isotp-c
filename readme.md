@@ -2,6 +2,9 @@
 
 [TOC]
 
+## 0. 注意
+- UDS:https://github.com/driftregion/iso14229 内置了iso-tp源码,此仓库仅为需要自行在多帧协议基础上自行扩展的使用.
+
 ## 1. 简介
 
 **isotp-c 适配软件包** 为优秀的开源库 [isotp-c](https://github.com/SimonCahill/isotp-c) 提供了一个线程安全、事件驱动、支持多链接的适配层，使其能够轻松地在 RT-Thread 项目中集成和使用 ISO 15765-2 (也被称为 CAN-TP 或 ISO-TP) 协议。
