@@ -1,23 +1,33 @@
 /**
  * @file isotp_rtt.h
- * @brief Public API header for the RT-Thread adapter layer for the isotp-c library.
+ * @brief Public API for the RT-Thread adapter layer around the upstream isotp-c library.
+ * @ingroup isotp_rtt_api
  *
- * This file defines the public interface for interacting with the ISO-TP adapter.
- * It provides functions to create, destroy, send, and receive ISO-TP messages
- * in a thread-safe and blocking manner suitable for an RTOS environment.
- * 
- * @author wdfk-prog ()
- * @version 1.1
- * @date 2025-11-08
- * 
- * @copyright Copyright (c) 2025  
- * 
- * @note :
- * @par 修改日志:
- * Date       Version Author      Description
- * 2025-11-08 1.0     wdfk-prog   first version
- * 2025-11-13 1.1     wdfk-prog   Implement non-blocking send functionality and optimize the blocking send interface
+ * This header exposes the adapter interface used by RT-Thread applications to create,
+ * destroy, send, and receive ISO-TP links on top of a CAN device.
  */
+
+/**
+ * @defgroup isotp_rtt_pkg RT-Thread ISO-TP Adapter
+ * @brief RT-Thread package that integrates the upstream isotp-c transport library.
+ *
+ * The package keeps CAN RX handling under application control and provides a
+ * thread-safe adapter layer for ISO-TP session handling, transmission, reception,
+ * and polling.
+ */
+
+/**
+ * @defgroup isotp_rtt_api Public API
+ * @ingroup isotp_rtt_pkg
+ * @brief Functions, types, and constants intended for application use.
+ */
+
+/**
+ * @defgroup isotp_rtt_retcode Adapter Return Codes
+ * @ingroup isotp_rtt_api
+ * @brief RT-Thread specific return codes that supplement the upstream isotp-c codes.
+ */
+
 #ifndef __ISOTP_RTT_H__
 #define __ISOTP_RTT_H__
 
@@ -25,11 +35,8 @@
 #include <rtdevice.h>
 #include "isotp-c/isotp.h"
 
-/**
- * @name RT-Thread Adapter Specific Return Codes
+/** @addtogroup isotp_rtt_retcode
  * @{
- * @brief These codes are returned by the adapter layer functions and supplement
- *        the standard ISOTP_RET_* codes from the core library.
  */
 #define ISOTP_RET_INVAL_ARGS   -8  ///< Invalid arguments passed to the function (e.g., NULL link).
 #define ISOTP_RET_TIMEOUT_RTT  -9  ///< Operation timed out (RT-Thread specific timeout).
@@ -37,9 +44,14 @@
 /** @} */
 
 
+/** @addtogroup isotp_rtt_api
+ * @{
+ */
+
 /**
- * @brief Handle to an ISO-TP link instance.
- * @note  This is an opaque pointer; users should not attempt to access its members directly.
+ * @brief Opaque handle to one ISO-TP link instance.
+ * @details Applications must treat this handle as opaque and must not access internal
+ *          members directly.
  */
 typedef struct isotp_rtt_link* isotp_rtt_link_t;
 
@@ -160,5 +172,7 @@ int isotp_rtt_send_nonblocking(isotp_rtt_link_t link, const uint8_t *payload, ui
  * @retval -RT_ERROR for other protocol-level errors.
  */
 rt_err_t isotp_rtt_receive(isotp_rtt_link_t link, uint8_t* payload_buf, uint16_t buf_size, uint16_t* out_size, rt_int32_t timeout);
+
+/** @} */
 
 #endif // __ISOTP_RTT_H__
