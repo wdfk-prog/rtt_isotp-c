@@ -1,29 +1,21 @@
 /**
  * @file isotp_rtt.c
- * @brief RT-Thread adapter layer for the isotp-c library (https://github.com/SimonCahill/isotp-c).
+ * @brief RT-Thread adapter implementation for the upstream isotp-c library.
+ * @ingroup isotp_rtt_internal
  *
- * This file provides a thread-safe, event-driven wrapper around the platform-agnostic
- * isotp-c library, making it easy to use within an RT-Thread environment.
- *
- * Key Features:
- * - Manages multiple ISO-TP links concurrently.
- * - Provides blocking, thread-safe send and receive APIs.
- * - Handles protocol timing and state machines in a dedicated background thread.
- * - Decouples CAN ISR from protocol processing.
- * - Supports unique naming for RTOS objects for easier debugging.
- * 
- * @author wdfk-prog ()
- * @version 1.1
- * @date 2025-11-05
- * 
- * @copyright Copyright (c) 2025  
- * 
- * @note :
- * @par 修改日志:
- * Date       Version Author      Description
- * 2025-11-05 1.0     wdfk-prog   first version
- * 2025-11-13 1.1     wdfk-prog   Implement non-blocking send functionality and optimize the blocking send interface
+ * This file implements the RT-Thread-facing transport adapter, including callback
+ * shims required by isotp-c, event-driven synchronization, link bookkeeping, and
+ * the background polling thread used to drive protocol timers.
  */
+
+/**
+ * @defgroup isotp_rtt_internal Internal Implementation
+ * @ingroup isotp_rtt_pkg
+ * @brief Internal data structures and helper functions used by the adapter.
+ * @details Items in this group are documented to support maintenance and Doxygen
+ *          browsing, but they are not intended to be used as a stable application API.
+ */
+
 #include "isotp_rtt.h"
 #include <string.h>
 
@@ -37,10 +29,11 @@
 #define EVENT_FLAG_ERROR   (1 << 2) ///< Event flag: An error occurred during transmission or reception.
 
 /**
- * @brief Internal structure representing a single ISO-TP link instance tailored for RT-Thread.
+ * @brief Internal representation of one adapter link instance.
+ * @ingroup isotp_rtt_internal
  *
- * This structure encapsulates the core IsoTpLink object and adds RT-Thread specific
- * resources like events for synchronization and mutexes for thread safety.
+ * This structure wraps the upstream `IsoTpLink` object and augments it with the
+ * RT-Thread synchronization primitives and metadata required by the adapter layer.
  */
 struct isotp_rtt_link
 {
@@ -64,19 +57,19 @@ struct isotp_rtt_link
 
 /* Global Resources */
 /**
- * @brief Head of the global linked list that manages all active isotp_rtt_link instances.
+ * @brief Head of the global list of active adapter links.
+ * @ingroup isotp_rtt_internal
  */
 static struct rt_list_node g_link_list_head = RT_LIST_OBJECT_INIT(g_link_list_head);
 
 /**
- * @brief Helper function to atomically print a title and hex data using ULOG.
- * @note  This function constructs a complete string in a temporary buffer before
- *        making a single call to LOG_D. This prevents log messages from being
- *        interleaved by other threads, which can happen if rt_kprintf and ulog_hexdump
- *        are called separately.
- * @param title A descriptive title for the hex data.
- * @param data  Pointer to the data buffer to be printed.
- * @param size  The size of the data in bytes.
+ * @brief Atomically print a short hex dump for debug logs.
+ * @ingroup isotp_rtt_internal
+ * @note The helper assembles the complete log line in a temporary buffer before a
+ *       single `LOG_D()` call so that concurrent threads do not interleave partial output.
+ * @param title Descriptive title shown before the dump.
+ * @param data Pointer to the data buffer to print.
+ * @param size Number of bytes to print.
  */
 void print_hex_data(const char *title, const uint8_t *data, uint16_t size)
 {
@@ -109,13 +102,13 @@ void print_hex_data(const char *title, const uint8_t *data, uint16_t size)
 /*************************************************************************************************/
 
 /**
- * @brief  Sends a single CAN frame. This is called by the isotp-c library whenever
- *         it needs to transmit a protocol frame (FF, CF, FC).
- * @param  arbitration_id The CAN ID for the message to be sent.
- * @param  data Pointer to the 8-byte (or less) data payload.
- * @param  size The size of the data payload (0-8 bytes).
- * @param  user_send_can_arg The user-defined argument, which we use to pass our isotp_rtt_link struct.
- * @return ISOTP_RET_OK on success, ISOTP_RET_ERROR on failure.
+ * @brief Shim used by the upstream library to transmit one CAN frame.
+ * @ingroup isotp_rtt_internal
+ * @param arbitration_id CAN identifier used for transmission.
+ * @param data Pointer to a payload up to 8 bytes.
+ * @param size Payload size in bytes.
+ * @param user_send_can_arg Adapter-owned user argument, expected to point to `struct isotp_rtt_link`.
+ * @return `ISOTP_RET_OK` on success, otherwise `ISOTP_RET_ERROR`.
  */
 int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t *data, const uint8_t size, void *user_send_can_arg)
 {
@@ -143,9 +136,10 @@ int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t *data, cons
 }
 
 /**
- * @brief  Provides a microsecond-resolution timestamp to the isotp-c library.
- * @note   This is critical for protocol timing (e.g., timeouts, STmin).
- * @return A 32-bit microsecond timestamp.
+ * @brief Provide a microsecond timestamp to the upstream ISO-TP stack.
+ * @ingroup isotp_rtt_internal
+ * @note This timestamp drives protocol timing such as STmin and timeout handling.
+ * @return Monotonic timestamp in microseconds, truncated to 32 bits.
  */
 uint32_t isotp_user_get_us(void)
 {
@@ -154,9 +148,10 @@ uint32_t isotp_user_get_us(void)
 }
 
 /**
- * @brief  Acts as the logging sink for the isotp-c library's internal debug messages.
- * @param  format The format string (printf-style).
- * @param  ... Variadic arguments for the format string.
+ * @brief Logging sink for upstream debug output.
+ * @ingroup isotp_rtt_internal
+ * @param format `printf`-style format string.
+ * @param ... Format arguments.
  */
 void isotp_user_debug(const char *format, ...)
 {
@@ -186,11 +181,12 @@ void isotp_user_debug(const char *format, ...)
 /*************************************************************************************************/
 
 /**
- * @brief  Called by isotp-c when a complete PDU has been transmitted successfully.
- * @note   Its sole purpose is to post an event to unblock any thread waiting in `isotp_rtt_send`.
- * @param  link_ptr A pointer to the core IsoTpLink instance.
- * @param  size The size of the PDU that was sent.
- * @param  user_arg The user argument, which points to our isotp_rtt_link struct.
+ * @brief Transmission-complete callback registered with the upstream stack.
+ * @ingroup isotp_rtt_internal
+ * @note The callback only signals the waiting RT-Thread event object.
+ * @param link_ptr Pointer to the upstream `IsoTpLink`.
+ * @param size Size of the transmitted PDU.
+ * @param user_arg Adapter-owned callback context.
  */
 static void _isotp_rtt_tx_done_cb(void *link_ptr, uint32_t size, void *user_arg)
 {
@@ -199,13 +195,13 @@ static void _isotp_rtt_tx_done_cb(void *link_ptr, uint32_t size, void *user_arg)
 }
 
 /**
- * @brief  Called by isotp-c when a complete PDU has been received and assembled.
- * @note   This function only needs to record the final size and post an event to unblock
- *         any thread waiting in `isotp_rtt_receive`.
- * @param  link_ptr A pointer to the core IsoTpLink instance.
- * @param  data Pointer to the start of the received data.
- * @param  size The size of the fully assembled PDU.
- * @param  user_arg The user argument, which points to our isotp_rtt_link struct.
+ * @brief Reception-complete callback registered with the upstream stack.
+ * @ingroup isotp_rtt_internal
+ * @note The callback records the final receive size and signals the waiting thread.
+ * @param link_ptr Pointer to the upstream `IsoTpLink`.
+ * @param data Pointer to the assembled payload.
+ * @param size Payload size in bytes.
+ * @param user_arg Adapter-owned callback context.
  */
 static void _isotp_rtt_rx_done_cb(void *link_ptr, const uint8_t *data, uint32_t size, void *user_arg)
 {
@@ -233,11 +229,11 @@ static void _isotp_rtt_rx_done_cb(void *link_ptr, const uint8_t *data, uint32_t 
 /*************************************************************************************************/
 
 /**
- * @brief  The entry point for the background polling thread.
- * @note   This thread is crucial. It periodically calls `isotp_poll()` for every active
- *         link. `isotp_poll()` is responsible for handling all time-dependent aspects
- *         of the protocol, such as message timeouts and separation time delays (STmin).
- * @param  parameter Unused.
+ * @brief Entry point of the background polling thread.
+ * @ingroup isotp_rtt_internal
+ * @note The thread periodically calls `isotp_poll()` for each active link so that
+ *       protocol timers, separation time handling, and timeout processing continue to run.
+ * @param parameter Unused thread argument.
  */
 static void _poll_thread_entry(void *parameter)
 {
@@ -253,10 +249,11 @@ static void _poll_thread_entry(void *parameter)
 }
 
 /**
- * @brief  Auto-initialization function for the adapter layer.
- * @note   This function is called automatically by the RT-Thread INIT_APP_EXPORT mechanism.
- *         Its only job is to create and start the background polling thread.
- * @return RT_EOK on success, -RT_ERROR on failure.
+ * @brief Auto-initialization hook that starts the polling thread.
+ * @ingroup isotp_rtt_internal
+ * @note Registered through `INIT_APP_EXPORT`, so the adapter starts its polling thread
+ *       automatically when the application initializes.
+ * @return `RT_EOK` on success, otherwise `-RT_ERROR`.
  */
 static int _isotp_rtt_init(void)
 {

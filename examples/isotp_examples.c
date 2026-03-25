@@ -1,30 +1,18 @@
 /**
  * @file isotp_examples.c
- * @brief An advanced example demonstrating the usage of the isotp-c RT-Thread adapter.
+ * @brief End-to-end RT-Thread example for the rtt_isotp-c adapter.
+ * @ingroup isotp_rtt_examples
  *
- * This file provides a comprehensive test suite for the ISO-TP adapter layer,
- * showcasing a client-server model, multi-link handling, and robust resource management.
- * It is intended to be run as an MSH command (`isotp_example start`/`stop`).
- *
- * Key features demonstrated:
- * - Communication between two CAN buses (can1 and can2).
- * - A producer-consumer model for safe, non-blocking CAN message handling from ISRs.
- * - Multi-frame message transmission and reception.
- * - Automatic verification of received data.
- * - Handling of one CAN ID being monitored by multiple links (server and logger).
- * - Proper resource allocation, cleanup, and restoration of the CAN device's original state.
- * - Configuration of CAN baud rate and hardware filters.
- * @author wdfk-prog ()
- * @version 1.0
- * @date 2025-11-08
- * 
- * @copyright Copyright (c) 2025  
- * 
- * @note :
- * @par 修改日志:
- * Date       Version Author      Description
- * 2025-11-08 1.0     wdfk-prog   first version
+ * The example demonstrates queue-based CAN RX decoupling, multi-link adapter usage,
+ * start/stop lifecycle management, and a simple client/server/logger topology.
  */
+
+/**
+ * @defgroup isotp_rtt_examples Examples
+ * @ingroup isotp_rtt_pkg
+ * @brief Example applications and integration patterns for the adapter.
+ */
+
 #include <rtthread.h>
 #include <rtdevice.h>
 #include "isotp_rtt.h"
@@ -62,7 +50,7 @@ static rt_thread_t rx_consumer_tid;
 static rt_thread_t client_tid, server_tid, logger_tid;
 
 /* --- Context Saving --- */
-/** @brief Typedef for the CAN RX callback function pointer for readability. */
+/** @brief Typedef for a CAN RX callback function pointer. */
 typedef rt_err_t (*can_rx_indicate_func_t)(rt_device_t dev, rt_size_t size);
 /** @brief Stores the original RX callback of can1 to restore it on exit. */
 static can_rx_indicate_func_t old_can1_rx_indicate = RT_NULL;
@@ -70,10 +58,8 @@ static can_rx_indicate_func_t old_can1_rx_indicate = RT_NULL;
 static can_rx_indicate_func_t old_can2_rx_indicate = RT_NULL;
 
 /**
- * @brief Helper function to atomically print a title and hex data using ULOG.
- * @note  This function is only compiled in if DBG_LVL is set to DBG_LOG or lower.
- *        It constructs the entire log message in a local buffer before making a
- *        single call to LOG_D to prevent interleaving from other threads.
+ * @brief Atomically print one short hex dump for the example logs.
+ * @note This helper is compiled only when the debug level enables detailed logging.
  */
 void _print_hex_data(const char *title, const uint8_t *data, uint16_t size)
 {
@@ -104,8 +90,8 @@ void _print_hex_data(const char *title, const uint8_t *data, uint16_t size)
 /*************************************************************************************************/
 
 /**
- * @brief The consumer thread. It blocks indefinitely waiting for messages on a queue.
- * @param parameter Unused.
+ * @brief Consumer thread that feeds queued CAN frames into the adapter.
+ * @param parameter Unused thread argument.
  */
 static void can_rx_consumer_thread_entry(void *parameter)
 {
@@ -122,12 +108,11 @@ static void can_rx_consumer_thread_entry(void *parameter)
 }
 
 /**
- * @brief The producer. This is the CAN RX callback function, executed in ISR context.
- * @note  This function must be extremely fast and non-blocking. Its only job is to
- *        read the CAN frame and post it to the message queue.
- * @param dev The device that triggered the interrupt.
- * @param size Unused.
- * @return RT_EOK.
+ * @brief CAN RX callback executed in ISR context.
+ * @note The callback performs only the minimum work required to move a frame into the queue.
+ * @param dev Device that triggered the callback.
+ * @param size Unused callback argument.
+ * @return `RT_EOK`.
  */
 static rt_err_t can_rx_callback(rt_device_t dev, rt_size_t size)
 {
@@ -289,10 +274,9 @@ static void client_thread_entry(void *param)
 /*************************************************************************************************/
 
 /**
- * @brief Starts the ISO-TP example.
- * @note  This function performs all necessary initialization: finding devices,
- *        creating RTOS objects, configuring CAN hardware, and starting threads.
- *        It carefully saves the original CAN device context before modifying it.
+ * @brief Start the ISO-TP example environment.
+ * @note The function locates devices, allocates RTOS objects, configures CAN hardware,
+ *       installs the temporary RX callbacks, and starts the example threads.
  */
 static void isotp_example_start(void)
 {
@@ -402,10 +386,8 @@ static void isotp_example_start(void)
 }
 
 /**
- * @brief Stops the ISO-TP example and cleans up all resources.
- * @note  This function is the counterpart to `isotp_example_start`. It deletes all
- *        threads and IPC objects, and most importantly, restores the CAN devices
- *        to their original state by restoring their RX callbacks.
+ * @brief Stop the ISO-TP example and clean up its resources.
+ * @note Restores the original CAN RX callbacks before closing the devices.
  */
 static void isotp_example_stop(void)
 {
