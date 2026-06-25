@@ -161,13 +161,19 @@ void isotp_user_debug(const char *format, ...)
     ulog_voutput(DBG_LVL, DBG_TAG, RT_TRUE, RT_NULL, 0, 0, 0, format, args);
     va_end(args);
 #else
+#include <stdarg.h>
+#define ISOTP_RTT_DEBUG_BUF_SIZE 128     /**< Buffer size used to format upstream debug output. */
+
     va_list args;
-    rt_kprintf("[%s/D] ", DBG_TAG);
+    char log_buf[ISOTP_RTT_DEBUG_BUF_SIZE];
+
     va_start(args, format);
-    rt_vprintf(format, args);
+    rt_vsnprintf(log_buf, sizeof(log_buf), format, args);
     va_end(args);
-    rt_kprintf("\n");
-#endif
+
+    rt_kprintf("[%s/D] %s\n", DBG_TAG, log_buf);
+#undef ISOTP_RTT_DEBUG_BUF_SIZE
+#endif /* defined(RT_USING_ULOG) && defined(ULOG_BACKEND_USING_CONSOLE) */
 }
 /** @} */
 
