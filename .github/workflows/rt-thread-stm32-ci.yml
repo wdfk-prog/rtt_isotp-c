@@ -1,0 +1,164 @@
+name: RT-Thread STM32 F4 CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rt-thread-stm32-f4-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RTTHREAD_REF: master
+  RTTHREAD_ENV_REF: master
+  BSP_REL_PATH: bsp/stm32/stm32f407-atk-explorer
+  STM32_SERIES_LC: stm32f4
+  PACKAGE_NAME: rtt_isotp-c
+
+jobs:
+  build-stm32-f4:
+    name: Build stm32f407-atk-explorer
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@v4
+        with:
+          path: package-src
+          submodules: recursive
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git make rsync wget xz-utils python3 python3-pip \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+          python3 -m pip install --user scons kconfiglib tqdm requests wget
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Clone RT-Thread and Env
+        run: |
+          git clone --depth 1 --branch "$RTTHREAD_REF" https://github.com/RT-Thread/rt-thread.git rt-thread
+          git clone --depth 1 --branch "$RTTHREAD_ENV_REF" https://github.com/RT-Thread/env.git env
+
+      - name: Build package in STM32 F4 BSP
+        run: |
+          export RTT_ROOT="$GITHUB_WORKSPACE/rt-thread"
+          export RTT_ENV="$GITHUB_WORKSPACE/env"
+          export RTT_CC=gcc
+          export RTT_EXEC_PATH="$(dirname "$(command -v arm-none-eabi-gcc)")"
+          export PATH="$HOME/.local/bin:$RTT_ENV:$PATH"
+
+          BSP_PATH="$RTT_ROOT/$BSP_REL_PATH"
+          PKG_PATH="$BSP_PATH/packages/$PACKAGE_NAME"
+          LOG_FILE="$GITHUB_WORKSPACE/build-stm32-f4.log"
+          : > "$LOG_FILE"
+
+          test -f "$RTT_ENV/env.py" || {
+            echo "RT-Thread Env entry not found: $RTT_ENV/env.py" >&2
+            find "$RTT_ENV" -maxdepth 3 -type f \( -name 'env.py' -o -name 'pkgs' \) >&2 || true
+            exit 1
+          }
+
+          test -f "$BSP_PATH/SConstruct" || {
+            echo "STM32 F4 BSP was not found: $BSP_PATH" >&2
+            find "$RTT_ROOT/bsp/stm32" -maxdepth 2 -name SConstruct -print >&2 || true
+            exit 1
+          }
+
+          cd "$BSP_PATH"
+          scons --pyconfig-silent 2>&1 | tee -a "$LOG_FILE"
+          python3 "$RTT_ENV/env.py" package --upgrade 2>&1 | tee -a "$LOG_FILE"
+          python3 "$RTT_ENV/env.py" package --update 2>&1 | tee -a "$LOG_FILE"
+
+          for header in "${STM32_SERIES_LC}xx.h" "${STM32_SERIES_LC}xx_hal.h"; do
+            if ! find packages -type f -name "$header" -print -quit | grep -q .; then
+              echo "Required STM32 package header was not fetched: $header" >&2
+              grep -E '^(PKG_USING_|SOC_SERIES_)' .config rtconfig.h >&2 || true
+              exit 1
+            fi
+          done
+
+          rm -rf "$PKG_PATH"
+          mkdir -p "$PKG_PATH"
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github/workflows/rt-thread-stm32-ci.yml' \
+            "$GITHUB_WORKSPACE/package-src/" "$PKG_PATH/"
+
+          grep -q "packages/$PACKAGE_NAME/SConscript" SConscript || cat >> SConscript <<'EOF_SCONS'
+
+          # CI-only staged package build.
+          SConscript('packages/rtt_isotp-c/SConscript')
+          EOF_SCONS
+
+          cat >> rtconfig.h <<'EOF_RTCONFIG'
+
+          /* CI-only package compile profile. */
+          #define RT_USING_CAN
+          #define BSP_USING_CAN
+          #define BSP_USING_CAN1
+          #define RT_KLIBC_USING_LIBC_VSNPRINTF
+          #define PKG_USING_ISOTP_C
+          #define PKG_ISOTP_C_POLL_THREAD_STACK_SIZE 1024
+          #define PKG_ISOTP_C_POLL_THREAD_PRIORITY 20
+          #define PKG_ISOTP_C_POLL_INTERVAL_MS 5
+          #define ISO_TP_USER_SEND_CAN_ARG
+          #define ISO_TP_TRANSMIT_COMPLETE_CALLBACK
+          #define ISO_TP_RECEIVE_COMPLETE_CALLBACK
+          EOF_RTCONFIG
+
+          HAL_CONF="$(find board/CubeMX_Config -type f -name "${STM32_SERIES_LC}xx_hal_conf.h" -print -quit)"
+          test -n "$HAL_CONF" || {
+            echo "STM32 HAL config file was not found for ${STM32_SERIES_LC}." >&2
+            find board -type f -name '*_hal_conf.h' -print >&2 || true
+            exit 1
+          }
+
+          HAL_CONF="$HAL_CONF" python3 - <<'PY_HAL'
+          import os
+          import re
+          from pathlib import Path
+
+          hal_conf = Path(os.environ["HAL_CONF"])
+          text = hal_conf.read_text(encoding="utf-8", errors="ignore")
+          if not re.search(r"^\s*#define\s+HAL_CAN_MODULE_ENABLED\b", text, re.MULTILINE):
+              anchor = re.search(r"^\s*#define\s+HAL_MODULE_ENABLED\b.*$", text, re.MULTILINE)
+              if anchor:
+                  insert_at = anchor.end()
+                  text = text[:insert_at] + "\n#define HAL_CAN_MODULE_ENABLED" + text[insert_at:]
+              else:
+                  text = "#define HAL_CAN_MODULE_ENABLED\n" + text
+              hal_conf.write_text(text, encoding="utf-8")
+          PY_HAL
+
+          CONFIG_PATTERN='^(#define[[:space:]]+)?(RT_USING_CAN|BSP_USING_CAN|BSP_USING_CAN1|RT_KLIBC_USING_LIBC_VSNPRINTF|PKG_USING_ISOTP_C|PKG_ISOTP_C_POLL_|ISO_TP_)'
+          grep -E "$CONFIG_PATTERN" rtconfig.h | tee -a "$LOG_FILE"
+          grep -E '^#define[[:space:]]+HAL_CAN_MODULE_ENABLED$' "$HAL_CONF" | tee -a "$LOG_FILE"
+          scons -j"$(nproc)" 2>&1 | tee -a "$LOG_FILE"
+
+          test -f rt-thread.elf
+          arm-none-eabi-size rt-thread.elf | tee -a "$LOG_FILE"
+          test -n "$(find build -type f -path "*/packages/$PACKAGE_NAME/*" -name '*.o' -print -quit)" || {
+            echo "Package objects were not built." >&2
+            exit 1
+          }
+
+      - name: Upload STM32 F4 build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stm32-f4-build-log
+          path: build-stm32-f4.log
+          if-no-files-found: error
